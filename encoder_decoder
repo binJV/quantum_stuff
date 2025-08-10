@@ -1,0 +1,110 @@
+import numpy as np
+import tensorflow as tf
+
+(train_images, train_labels), (_, _) = tf.keras.datasets.fashion_mnist.load_data()
+images_normalized = train_images / 255.0
+np.save('images.npy', images_normalized)
+np.save('labels.npy', train_labels)
+print("Successfully created 'images.npy' and 'labels.npy'.")
+print("-" * 20)
+
+import qiskit
+from qiskit import QuantumCircuit
+from qiskit import Aer
+import numpy as np
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+
+images = np.load('images.npy')
+labels = np.load('labels.npy')
+
+def resize_image(img, height, width):
+    output = np.zeros((height, width), dtype=img.dtype)
+    iht, iwidth = img.shape
+    scale_y, scale_x = iht / height, iwidth / width
+    for i in range(height):
+        for j in range(width):
+            x = j * scale_x
+            y = i * scale_y
+            fx, fy = x - np.floor(x), y - np.floor(y)
+            ix, iy = int(np.floor(x)), int(np.floor(y))
+            ix_ceil = min(iwidth - 1, int(np.ceil(x)))
+            iy_ceil = min(iht - 1, int(np.ceil(y)))
+            lu = img[iy, ix]
+            ru = img[iy, ix_ceil]
+            ll = img[iy_ceil, ix]
+            rl = img[iy_ceil, ix_ceil]
+            top = (ru * fx) + (lu * (1.0 - fx))
+            bottom = (rl * fx) + (ll * (1.0 - fx))
+            output[i, j] = (top * fy) + (bottom * (1.0 - fy))
+    return output
+
+def image_mse(image1, image2):
+    return mean_squared_error(255 * image1, 255 * image2)
+
+def count_2q_gates(circuit: QuantumCircuit) -> int:
+    decomposed_circuit = circuit.decompose()
+    return decomposed_circuit.count_ops().get('cx', 0)
+
+def encoder(image: np.ndarray) -> QuantumCircuit:
+    img_resized = resize_image(image, 16, 16)
+    img_vector = img_resized.flatten()
+    norm = np.linalg.norm(img_vector)
+    if norm > 0:
+        img_vector = img_vector / norm
+    qc = QuantumCircuit(8)
+    qc.initialize(img_vector, qc.qubits)
+    return qc
+
+def decoder(state_vector: np.ndarray) -> np.ndarray:
+    pixel_amplitudes = np.abs(state_vector)
+    img_re = pixel_amplitudes.reshape(16, 16)
+    img_re = resize_image(img_re, 28, 28)
+    max_val = np.max(img_re)
+    if max_val > 0:
+        img_re = img_re / max_val
+    return img_re
+
+backend = Aer.get_backend('statevector_simulator')
+
+n = len(images)
+total_mse = 0
+total_gate_count = 0
+
+print(f"Starting autoencoder simulation for {n} images...")
+
+for i, image_data in enumerate(images):
+    circuit = encoder(image_data)
+    gate_cost = count_2q_gates(circuit)
+    total_gate_count += gate_cost
+    result = backend.run(circuit).result()
+    statevector = result.get_statevector()
+    image_re = decoder(statevector)
+    total_mse += image_mse(image_data, image_re)
+    if (i + 1) % 100 == 0:
+        print(f"  Processed image {i+1}/{n}...")
+
+avg_mse = total_mse / n
+avg_gate_count = total_gate_count / n
+fidelity = 1 - avg_mse
+score = fidelity * (0.999 ** avg_gate_count)
+
+print("\n--- Final Results ---")
+print(f"Average MSE: {avg_mse:.6f}")
+print(f"Reconstruction Fidelity (1 - Avg MSE): {fidelity:.6f}")
+print(f"Average 2-Qubit Gate Count: {avg_gate_count:.2f}")
+print(f"Final Score: {score:.6f}")
+
+print("\nVisualizing a sample reconstruction...")
+sample_circuit = encoder(images[0])
+sample_sv = backend.run(sample_circuit).result().get_statevector()
+reconstructed_sample = decoder(sample_sv)
+
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+axes[0].imshow(images[0], cmap='gray')
+axes[0].set_title('Original Image')
+axes[0].axis('off')
+axes[1].imshow(reconstructed_sample, cmap='gray')
+axes[1].set_title('Reconstructed Image')
+axes[1].axis('off')
+plt.show()
